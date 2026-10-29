@@ -330,6 +330,10 @@ class Sync(unittest.TestCase):
         self.assertNotIn("newer", self.show("org", "craft-libs", "sync/engine/2026-11-02", "lib.rs"))
         self.assertEqual(self.show("org", "craft-libs", "sync/engine/2026-11-02", ".github/CODEOWNERS").splitlines()[-1],
                          "* @org/engine")
+        # The branch had no metadata commit before: the range-diff shows the new one in full.
+        [(_, rd)] = self.range_diffs
+        self.assertIn("pilot: fork metadata", rd)
+        self.assertIn("+* @org/engine", rd)
 
     def test_cargo_env_joins_an_existing_config(self):
         path = Path(self.tmp.name) / "config.toml"
