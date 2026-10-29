@@ -1,0 +1,19 @@
+{
+  "status": "draft",
+  "parents": [
+    "pbr-engine"
+  ],
+  "branches": [
+    {
+      "repo": "deckcraft",
+      "branch": "fork/pbr-deckcraft",
+      "base": "main",
+      "pins": {
+        "craft-libs": "pbr-engine"
+      }
+    }
+  ],
+  "members": [
+    "addibble"
+  ]
+}

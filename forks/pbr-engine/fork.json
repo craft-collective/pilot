@@ -1,0 +1,22 @@
+{
+  "status": "draft",
+  "parents": [],
+  "branches": [
+    {
+      "repo": "craft-libs",
+      "branch": "fork/pbr-engine",
+      "base": "pinned-by:effectcraft,vectorcraft,deckcraft,photocraft"
+    },
+    {
+      "repo": "effectcraft",
+      "branch": "fork/pbr-engine",
+      "base": "main",
+      "pins": {
+        "craft-libs": "pbr-engine"
+      }
+    }
+  ],
+  "members": [
+    "addibble"
+  ]
+}

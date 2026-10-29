@@ -1,0 +1,26 @@
+name: apply
+
+# What main says is what the org has: a merged decision or a membership change makes its
+# teams, branches and rules match, with no one running setup by hand.
+on:
+  push:
+    branches: [main]
+    paths: ["pilot.json", "forks/*/fork.json"]
+  workflow_dispatch:
+
+concurrency:
+  group: pilot-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/pilot.py check
+      - name: Apply
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+        run: |
+          [ -z "$GH_TOKEN" ] || gh auth setup-git
+          python3 scripts/pilot.py setup

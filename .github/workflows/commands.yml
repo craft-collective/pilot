@@ -1,0 +1,32 @@
+name: commands
+
+# /ready and /promote on a sync issue. Who may run them is checked against forks.json on the
+# default branch, never against anything in the comment.
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: pilot-sync
+  cancel-in-progress: false
+
+jobs:
+  command:
+    if: >-
+      !github.event.issue.pull_request &&
+      contains(github.event.issue.labels.*.name, 'sync') &&
+      (startsWith(github.event.comment.body, '/ready') || startsWith(github.event.comment.body, '/promote'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run the command
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          LOGIN: ${{ github.event.comment.user.login }}
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          [ -z "$GH_TOKEN" ] || gh auth setup-git
+          python3 scripts/pilot.py command --issue "$ISSUE" --user "$LOGIN" --body "$BODY"

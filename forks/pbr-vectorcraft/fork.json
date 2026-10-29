@@ -1,0 +1,19 @@
+{
+  "status": "draft",
+  "parents": [
+    "pbr-engine"
+  ],
+  "branches": [
+    {
+      "repo": "vectorcraft",
+      "branch": "fork/pbr-vectorcraft",
+      "base": "main",
+      "pins": {
+        "craft-libs": "pbr-engine"
+      }
+    }
+  ],
+  "members": [
+    "addibble"
+  ]
+}

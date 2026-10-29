@@ -1,0 +1,63 @@
+name: votes
+
+# Every change to this repository is a PR its members vote on (PROCESS.md, Decisions), and
+# /join and /leave on an issue change membership. Runs only code from the default branch:
+# pull_request_target checks out the base, never the PR.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "41 * * * *" # hourly, to close votes whose discussion time has run out
+
+concurrency:
+  group: pilot-votes
+  cancel-in-progress: false
+
+jobs:
+  pr:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       (startsWith(github.event.comment.body, '/vote') || startsWith(github.event.comment.body, '/join')))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tally
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          LOGIN: ${{ github.event.comment.user.login }}
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          if [ -n "$BODY" ]; then
+            python3 scripts/pilot.py vote --pr "$PR" --user "$LOGIN" --body "$BODY"
+          else
+            python3 scripts/pilot.py vote --pr "$PR"
+          fi
+
+  membership:
+    if: >-
+      github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, '/join') || startsWith(github.event.comment.body, '/leave'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Join or leave
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          LOGIN: ${{ github.event.comment.user.login }}
+          BODY: ${{ github.event.comment.body }}
+        run: python3 scripts/pilot.py member --issue "$ISSUE" --user "$LOGIN" --body "$BODY"
+
+  sweep:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-tally open PRs
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+        run: python3 scripts/pilot.py vote

@@ -1,0 +1,31 @@
+{
+  "org": "craft-collective",
+  "upstream_owner": "storytold",
+  "review": {
+    "approvals": 0,
+    "solo": true
+  },
+  "votes": {
+    "hours": 0,
+    "quorum": 1,
+    "majority": 0.67,
+    "min_account_age_days": 30
+  },
+  "repos": {
+    "craft-libs": {
+      "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    },
+    "effectcraft": {
+      "check": "cargo xtask ci"
+    },
+    "vectorcraft": {
+      "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    },
+    "deckcraft": {
+      "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    },
+    "photocraft": {
+      "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    }
+  }
+}

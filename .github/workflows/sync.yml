@@ -1,0 +1,29 @@
+name: sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC: the weekly sync point
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: Fork id (blank syncs every fork)
+        required: false
+
+concurrency:
+  group: pilot-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+          FORK: ${{ inputs.fork }}
+        run: |
+          [ -z "$GH_TOKEN" ] || gh auth setup-git
+          python3 scripts/pilot.py sync $FORK

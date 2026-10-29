@@ -1,0 +1,19 @@
+{
+  "status": "draft",
+  "parents": [
+    "pbr-engine"
+  ],
+  "branches": [
+    {
+      "repo": "photocraft",
+      "branch": "fork/pbr-photocraft",
+      "base": "main",
+      "pins": {
+        "craft-libs": "pbr-engine"
+      }
+    }
+  ],
+  "members": [
+    "addibble"
+  ]
+}

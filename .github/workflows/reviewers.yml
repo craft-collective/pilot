@@ -1,0 +1,17 @@
+name: reviewers
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly
+  workflow_dispatch:
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assign reviewers to new patch PRs
+        env:
+          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+        run: python3 scripts/pilot.py assign
