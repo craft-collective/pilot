@@ -3,12 +3,14 @@
 membership, reviewer assignment and the ledger of who did what. PROCESS.md is the rulebook;
 this enforces it.
 
-Runs in GitHub Actions with GH_TOKEN set to a token that can push to the org's repositories,
-and locally (`--dry-run` prints what it would do on GitHub). Needs git and gh; refreshing a
-Cargo.lock after re-pinning craft-libs needs cargo. Python 3.9+, standard library only.
+Runs in GitHub Actions as the org's GitHub App (pilot.json `app_id`, its private key in
+PILOT_APP_KEY), and locally (`--dry-run` prints what it would do on GitHub). Needs git, gh and
+openssl; refreshing a Cargo.lock after re-pinning craft-libs needs cargo. Python 3.9+, standard
+library only.
 """
 
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -18,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -101,6 +105,8 @@ def validate(cfg, root=None):
     votes = cfg["votes"]
     if not review.get("solo") and (votes["hours"] < 48 or votes["quorum"] < 3):
         problems.append("votes need at least 48 hours and a quorum of 3 outside the solo phase")
+    if cfg.get("app_id") is not None and not isinstance(cfg["app_id"], int):
+        problems.append("app_id is the bot's GitHub App id, a number")
     if not 0.5 < votes["majority"] <= 1:
         problems.append("votes.majority must be more than half")
     ids = [f["id"] for f in cfg["forks"]]
@@ -217,8 +223,56 @@ def git_commit(wd, *args):
     return run(["git", *args], cwd=wd, env=BOT_ENV).stdout.strip()
 
 
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+
+class App:
+    """The bot is a GitHub App (pilot.json `app_id`). Its installation tokens last an hour and a
+    sync can take three, so it mints a new one whenever the last is close to running out."""
+
+    def __init__(self, app_id, key, org):
+        self.app_id, self.key, self.org = app_id, key, org
+        self._token, self._expires = None, 0.0
+
+    def jwt(self, now=None):
+        now = int(now or time.time())
+        signing = (b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()) + b"." +
+                   b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": str(self.app_id)}).encode()))
+        with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
+            f.write(self.key)
+            f.flush()
+            r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", f.name], input=signing,
+                               capture_output=True)
+        if r.returncode:
+            raise SyncError(f"couldn't sign with the app's key: {r.stderr.decode().strip()}")
+        return (signing + b"." + b64url(r.stdout)).decode()
+
+    def _call(self, path, method="GET"):
+        req = urllib.request.Request(f"https://api.github.com/{path}", method=method, headers={
+            "Authorization": f"Bearer {self.jwt()}", "Accept": "application/vnd.github+json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            raise SyncError(f"GitHub App {method} {path} failed: {e.code} {e.read().decode()}")
+
+    def login(self):
+        return self._call("app")["slug"] + "[bot]"
+
+    def token(self):
+        if time.time() > self._expires - 600:
+            installation = self._call(f"orgs/{self.org}/installation")["id"]
+            t = self._call(f"app/installations/{installation}/access_tokens", "POST")
+            self._token = t["token"]
+            self._expires = datetime.datetime.fromisoformat(t["expires_at"].replace("Z", "+00:00")).timestamp()
+        return self._token
+
+
 class GitHub:
-    """The GitHub side, through gh. DryGitHub prints writes instead of making them."""
+    """The GitHub side, through gh. DryGitHub prints writes instead of making them. As the App
+    when PILOT_APP_KEY is set; otherwise as whoever gh is logged in as (an org owner, for the
+    first `setup`)."""
 
     dry = False
 
@@ -226,11 +280,19 @@ class GitHub:
         self.cfg = cfg
         self.git_base = git_base
         self.pilot = os.environ.get("GITHUB_REPOSITORY") or f"{cfg['org']}/pilot"
+        key = os.environ.get("PILOT_APP_KEY")
+        self.app = App(cfg["app_id"], key, cfg["org"]) if key and cfg.get("app_id") else None
+
+    def auth(self):
+        """gh, and git through the credential helper in push, read the token from GH_TOKEN."""
+        if self.app:
+            os.environ["GH_TOKEN"] = self.app.token()
 
     def url(self, owner, repo):
         return f"{self.git_base}/{owner}/{repo}"
 
     def api(self, path, method="GET", body=None, check=True):
+        self.auth()
         args = ["gh", "api", "-X", method, path]
         if body is not None:
             args += ["--input", "-"]
@@ -243,12 +305,21 @@ class GitHub:
         return json.loads(r.stdout) if r.stdout.strip() else {}
 
     def gh(self, *args):
+        self.auth()
         return run(["gh", *args]).stdout.strip()
 
     def login(self):
+        """The bot's login as REST gives it: `<slug>[bot]` for the App, which no person can have."""
         if not hasattr(self, "_login"):
-            self._login = self.api("user")["login"]
+            self._login = self.app.login() if self.app else self.api("user")["login"]
         return self._login
+
+    def comments(self, number):
+        """An issue's or PR's comments, through REST: GraphQL gives a bot's login without its
+        `[bot]`, which a person could register."""
+        out = self.gh("api", "--paginate", f"repos/{self.pilot}/issues/{number}/comments",
+                      "--jq", ".[] | {id: .node_id, login: .user.login, body: .body}")
+        return [json.loads(line) for line in out.splitlines()]
 
     def file_at(self, repo, path, ref):
         import base64
@@ -305,7 +376,11 @@ class GitHub:
         self.gh("issue", "close", str(number), "-R", self.pilot, "--comment", comment)
 
     def push(self, wd, *args):
-        git(wd, "push", *args)
+        self.auth()
+        helper = ([] if not self.app else
+                  ["-c", "credential.helper=",
+                   "-c", "credential.helper=!f() { echo username=x-access-token; echo \"password=$GH_TOKEN\"; }; f"])
+        git(wd, *helper, "push", *args)
 
 
 class DryGitHub(GitHub):
@@ -959,7 +1034,7 @@ def cmd_vote(gh, args):
 def vote_on(gh, number, user=None, body=None):
     cfg = gh.cfg
     pr = json.loads(gh.gh("pr", "view", str(number), "-R", gh.pilot,
-                          "--json", "author,headRefOid,isDraft,state,comments"))
+                          "--json", "author,headRefOid,isDraft,state"))
     if pr["state"] != "OPEN":
         return
     files = gh.api(f"repos/{gh.pilot}/pulls/{number}/files?per_page=100")
@@ -968,7 +1043,7 @@ def vote_on(gh, number, user=None, body=None):
         check_members_unchanged(gh, fork_by_id(cfg, fork_id), f"refs/pull/{number}/head")
     bot = gh.login()
     # Only the bot's own comment holds the tally; anyone can paste the marker.
-    mine = [c for c in pr["comments"] if c["author"]["login"] == bot and VOTE_RE.search(c["body"])]
+    mine = [c for c in gh.comments(number) if c["login"] == bot and VOTE_RE.search(c["body"])]
     state = (json.loads(VOTE_RE.search(mine[-1]["body"]).group(1)) if mine
              else {"votes": {}, "heads": {}, "joiners": []})
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
@@ -1077,7 +1152,8 @@ def cmd_member(gh, args):
 
 def cmd_setup(gh, args):
     """Forks the repositories into the org, makes each fork's team and branch, and protects the
-    fork branches. Safe to run again: it skips what exists. Needs an org owner's token."""
+    fork branches. Safe to run again: it skips what exists. The first run is an org owner's, by
+    hand: the App can't fork another account's repositories. After that, the App keeps it current."""
     cfg = gh.cfg
     org, up = cfg["org"], cfg["upstream_owner"]
 
@@ -1086,8 +1162,15 @@ def cmd_setup(gh, args):
         if not gh.dry:
             fn()
 
+    bypass = [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]
+    if cfg.get("app_id"):
+        bypass.append({"actor_id": cfg["app_id"], "actor_type": "Integration", "bypass_mode": "always"})
+
     for repo in cfg["repos"]:
         if gh.api(f"repos/{org}/{repo}", check=False) is None:
+            if gh.app:
+                raise SyncError(f"{org}/{repo} doesn't exist, and the App can't fork it: an org owner "
+                                "runs `pilot.py setup` once by hand (SETUP.md)")
             act(f"fork {up}/{repo} into {org}",
                 lambda: gh.gh("repo", "fork", f"{up}/{repo}", "--org", org, "--clone=false",
                               "--default-branch-only"))
@@ -1116,8 +1199,8 @@ def cmd_setup(gh, args):
         act(f"{org}/{repo}: protect fork/*", lambda: gh.api(path, method, {
             "name": "pilot forks", "target": "branch", "enforcement": "active",
             "conditions": {"ref_name": {"include": ["refs/heads/fork/*"], "exclude": []}},
-            # Repository admins (role 5) bypass, so the bot's token can promote syncs.
-            "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+            # The App bypasses, so it can promote syncs; so do repository admins (org owners).
+            "bypass_actors": bypass,
             "rules": [
                 {"type": "deletion"},
                 {"type": "non_fast_forward"},
@@ -1138,7 +1221,7 @@ def cmd_setup(gh, args):
     act(f"{gh.pilot}: main takes only voted PRs", lambda: gh.api(path, method, {
         "name": "decisions by vote", "target": "branch", "enforcement": "active",
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+        "bypass_actors": bypass,
         "rules": [{"type": "deletion"}, {"type": "non_fast_forward"},
                   {"type": "pull_request", "parameters": {
                       "required_approving_review_count": 0, "require_code_owner_review": False,
@@ -1288,8 +1371,8 @@ def main(argv=None):
     i = sub.add_parser("invites", help="print the invitations from invites/")
     i.add_argument("--fork")
     args = p.parse_args(argv)
-    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("GH_TOKEN") and args.cmd not in ("check", "invites"):
-        print("PILOT_TOKEN isn't set, so the bot does nothing yet (SETUP.md).")
+    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("PILOT_APP_KEY") and args.cmd not in ("check", "invites"):
+        print("PILOT_APP_KEY isn't set, so the bot does nothing yet (SETUP.md).")
         return
     cfg = load_config(args.root)
     gh = (DryGitHub if args.dry_run else GitHub)(cfg, os.environ.get("PILOT_GIT_BASE", "https://github.com"))

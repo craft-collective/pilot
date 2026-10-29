@@ -22,9 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Sync
         env:
-          GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
+          PILOT_APP_KEY: ${{ secrets.PILOT_APP_KEY }}
           FORK: ${{ inputs.fork }}
           LOGIN: ${{ github.actor }}
         run: |
-          [ -z "$GH_TOKEN" ] || gh auth setup-git
           python3 scripts/pilot.py sync "$FORK" --user "$LOGIN"

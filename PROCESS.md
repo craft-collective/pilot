@@ -110,7 +110,7 @@ While the pilot is being tried out by one person, `pilot.json` has `review.solo`
 ## What is still centralized
 
 - **The org has owners**, and an owner can override anything on GitHub. The founder is one. The pilot's first process vote after the solo phase should add more owners, chosen by the members.
-- **The bot's token** belongs to an org owner's machine account. Whoever holds it could act as the bot.
+- **The bot is a GitHub App** that the org owns. Whoever holds its private key could act as the bot, and an org owner can change what it may do.
 - **Identity is a GitHub account.** Membership is open and accounts are cheap, so votes resist sock puppets only as far as the account-age rule does.
 
 ## What we're testing

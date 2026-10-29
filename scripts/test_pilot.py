@@ -160,6 +160,54 @@ def sh(cwd, *args):
                                "HOME": str(cwd)}).stdout.strip()
 
 
+class App(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.key = Path(self.tmp.name) / "app.pem"
+        subprocess.run(["openssl", "genrsa", "-out", str(self.key), "2048"], check=True, capture_output=True)
+        self.app = pilot.App(12345, self.key.read_text(), "org")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_jwt_is_signed_with_the_apps_key(self):
+        import base64
+        import json
+        signing, _, sig = self.app.jwt(now=1_700_000_000).rpartition(".")
+        payload = json.loads(base64.urlsafe_b64decode(signing.split(".")[1] + "=="))
+        self.assertEqual(payload, {"iat": 1_699_999_940, "exp": 1_700_000_540, "iss": "12345"})
+        pub = Path(self.tmp.name) / "app.pub"
+        subprocess.run(["openssl", "rsa", "-in", str(self.key), "-pubout", "-out", str(pub)],
+                       check=True, capture_output=True)
+        sigfile = Path(self.tmp.name) / "sig"
+        sigfile.write_bytes(base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4)))
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(pub), "-signature", str(sigfile)],
+                           input=signing.encode(), capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_token_is_reused_until_it_nearly_runs_out(self):
+        minted = []
+
+        def call(path, method="GET"):
+            if path == "orgs/org/installation":
+                return {"id": 7}
+            minted.append(path)
+            expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=self.ttl)
+            return {"token": f"t{len(minted)}", "expires_at": expires.isoformat().replace("+00:00", "Z")}
+
+        self.app._call = call
+        self.ttl = 60
+        self.assertEqual([self.app.token(), self.app.token()], ["t1", "t1"])
+        self.assertEqual(minted, ["app/installations/7/access_tokens"])
+        self.app._expires = 0  # an hour later
+        self.assertEqual(self.app.token(), "t2")
+
+    def test_app_id_is_a_number(self):
+        cfg = pilot.load_config()
+        cfg["app_id"] = "12345"
+        self.assertTrue(any("app_id" in p for p in pilot.validate(cfg)))
+
+
 class FakeGitHub(pilot.GitHub):
     """Real git against local repositories; issue traffic is recorded, not sent."""
 

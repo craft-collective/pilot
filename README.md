@@ -63,4 +63,4 @@ Locally:
 - `--dry-run` prints what any command would do on GitHub, without doing it.
 - `python3 -m unittest discover -s scripts` runs the tests.
 
-The bot runs as its own machine account; [SETUP.md](SETUP.md) has the one-time setup.
+The bot is the org's GitHub App; [SETUP.md](SETUP.md) has the one-time setup.
