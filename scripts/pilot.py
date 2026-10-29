@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1090,6 +1091,14 @@ def cmd_setup(gh, args):
             act(f"fork {up}/{repo} into {org}",
                 lambda: gh.gh("repo", "fork", f"{up}/{repo}", "--org", org, "--clone=false",
                               "--default-branch-only"))
+            # GitHub makes a fork in the background; branches can't be made in it until it has one.
+            for _ in range(60 if not gh.dry else 0):
+                if gh.api(f"repos/{org}/{repo}/git/ref/heads/main", check=False) is not None:
+                    break
+                time.sleep(5)
+            else:
+                if not gh.dry:
+                    raise SyncError(f"{org}/{repo} was forked but isn't ready after five minutes")
         act(f"{org}/{repo}: squash merges only",
             lambda: gh.api(f"repos/{org}/{repo}", "PATCH", {
                 "allow_squash_merge": True, "allow_merge_commit": False, "allow_rebase_merge": False,
@@ -1156,8 +1165,12 @@ def cmd_setup(gh, args):
                 if b["base"] == "main":
                     sha = gh.api(f"repos/{up}/{repo}/commits/main")["sha"]
                 else:
+                    # From upstream alone, so that it works before the org's copy exists (--dry-run).
                     with tempfile.TemporaryDirectory() as workroot:
-                        sha = resolve_base(gh, clone(gh, repo, workroot), repo, b["base"])
+                        wd = Path(workroot) / repo
+                        run(["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+                             "--origin", "upstream", gh.url(up, repo), str(wd)])
+                        sha = resolve_base(gh, wd, repo, b["base"])
                 act(f"{org}/{repo}: branch {b['branch']} at {sha[:10]}",
                     lambda: gh.api(f"repos/{org}/{repo}/git/refs", "POST",
                                    {"ref": f"refs/heads/{b['branch']}", "sha": sha}))
