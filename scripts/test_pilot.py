@@ -331,6 +331,15 @@ class Sync(unittest.TestCase):
         self.assertEqual(self.show("org", "craft-libs", "sync/engine/2026-11-02", ".github/CODEOWNERS").splitlines()[-1],
                          "* @org/engine")
 
+    def test_a_first_sync_with_no_patches_shows_the_metadata_commit(self):
+        [record] = self.sync("engine")
+        self.assertEqual(record["status"], "clean")
+        [(repo, rd)] = self.range_diffs
+        self.assertEqual(repo, "craft-libs")
+        self.assertIn("No patches before the sync", rd)
+        self.assertIn(pilot.METADATA_SUBJECT, rd)
+        self.assertIn("+* @org/engine", rd)
+
     def test_child_pins_the_parents_head_and_drops_upstreamed_patches(self):
         engine_head = self.ref("org", "craft-libs", "fork/engine")
         p1 = self.admit("app", "fork/app-int", {"b.txt": "bee\n"}, "add b")

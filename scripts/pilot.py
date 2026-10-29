@@ -586,10 +586,25 @@ def sync_branch(gh, fork, branch, workroot, date, heads, refresh_lock=True):
     else:
         state.update(status="clean", head=write_metadata(gh, fork, wd, targets, refresh_lock))
         heads[repo] = state["head"]
-        state["_range_diff"] = git(wd, "range-diff", "--no-color", f"{old_base}..{old_head}",
-                                   f"{new_base}..{state['head']}")
+        state["_range_diff"] = range_diff(wd, f"{old_base}..{old_head}", f"{new_base}..{state['head']}")
     gh.push(wd, "--force", "origin", f"HEAD:refs/heads/{sync_ref}")
     return state
+
+
+def range_diff(wd, old, new):
+    """git range-diff, which refuses an empty range. A branch's first sync has one, and then the
+    other side is shown in full: every line of it is new to the reviewer."""
+    def full(side):
+        return git(wd, "log", "--reverse", "--no-color", "-p", "--format=commit %H%n%n    %s%n", side)
+
+    has_old, has_new = (bool(git(wd, "rev-list", "-1", r)) for r in (old, new))
+    if has_old and has_new:
+        return git(wd, "range-diff", "--no-color", old, new)
+    if has_new:
+        return "No patches before the sync. The commits after it:\n\n" + full(new)
+    if has_old:
+        return "No patches after the sync. The commits before it:\n\n" + full(old)
+    return "No patches before or after the sync."
 
 
 def sync_fork(gh, fork, workroot, date, refresh_lock=True, start=0, prior=None):
