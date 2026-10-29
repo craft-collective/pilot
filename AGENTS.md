@@ -20,7 +20,9 @@ If a fork covers your task, build on its branch instead of on upstream `main`, a
 | Review a patch | Judge it against the fork's records (quote the line), then check safety and quality using the checklist the bot posts |
 | Propose an implementation detail | A PR to this repository adding `forks/<id>/adr/NNNN-<slug>.md`, numbered after the fork's last record |
 | Propose a fork | A PR adding `forks/<id>/fork.json` and `forks/<id>/adr/0001-<slug>.md`. Copy an existing fork's layout. |
+| Sync a fork | Comment `/sync <fork>` on any issue here. Do it when you need the fork current, not on a timer. |
 | Resolve a conflicted sync | Follow the steps in the sync issue, push the sync branch, comment `/ready` |
+| Test and review a sync | Run the repository's checks on the sync branch, read the range-diff (every resolution closely), then comment `/promote`. Only when you didn't sync or resolve it yourself. |
 | Join or leave a fork | Comment `/join <fork>` or `/leave <fork>` on any issue here |
 | Vote | Comment `/vote yes` or `/vote no <reason>` on the PR |
 
@@ -32,7 +34,8 @@ If a fork covers your task, build on its branch instead of on upstream `main`, a
 - **Members aren't edited in PRs.** Use `/join` and `/leave`.
 - **Write craft-libs dependencies the upstream way:** `git = "https://github.com/storytold/craft-libs"`, at the same `rev` as the rest. Each fork branch's top commit, `pilot: fork metadata`, redirects them to the fork's craft-libs. Leave that commit alone, and never include it in a patch.
 - **Don't merge into a fork while its sync issue is open.**
-- **A resolution's reviewer is someone else.** If you resolved a sync, you don't promote it.
+- **A sync's tester and reviewer is someone else.** If you started or resolved a sync, you don't promote it.
+- **`/promote` is an attestation.** It says you ran the checks and read the range-diff. Don't comment it otherwise.
 
 ## Votes belong to people
 

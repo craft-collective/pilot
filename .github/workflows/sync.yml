@@ -1,13 +1,13 @@
 name: sync
 
+# Syncs are on demand: a member comments `/sync <fork>` on any issue (the commands workflow),
+# or runs this by hand. Whoever starts it is credited with the sync.
 on:
-  schedule:
-    - cron: "0 6 * * 1" # Mondays, 06:00 UTC: the weekly sync point
   workflow_dispatch:
     inputs:
       fork:
-        description: Fork id (blank syncs every fork)
-        required: false
+        description: Fork id
+        required: true
 
 concurrency:
   group: pilot-sync
@@ -24,6 +24,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PILOT_TOKEN }}
           FORK: ${{ inputs.fork }}
+          LOGIN: ${{ github.actor }}
         run: |
           [ -z "$GH_TOKEN" ] || gh auth setup-git
-          python3 scripts/pilot.py sync $FORK
+          python3 scripts/pilot.py sync "$FORK" --user "$LOGIN"

@@ -1,6 +1,6 @@
 # How the pilot works
 
-Each fork is one feature that upstream hasn't merged, kept current and usable by the people who want it. A fork has a set of decision records, a set of members, and a branch in each repository it changes. Its members decide together, review patches into it, and take turns rebasing it onto upstream every week.
+Each fork is one feature that upstream hasn't merged, kept current and usable by the people who want it. A fork has a set of decision records, a set of members, and a branch in each repository it changes. Its members decide together, review patches into it, and sync it with upstream whenever it needs it. Whoever does a piece of the work gets the credit for it.
 
 **Nobody is a gatekeeper.** Every rule here is enforced by the bot (`scripts/pilot.py`), and every change to the rules, a fork or its decisions is a PR that the people it binds vote on. The bot merges what passes. No person, including the pilot's founder, approves anything alone. What is still centralized is listed at the end.
 
@@ -14,7 +14,7 @@ Each fork is one feature that upstream hasn't merged, kept current and usable by
 - Lifecycle: `draft` → `open` → `done` → `merged`, `superseded` or `stale`.
   - `0001` can be changed by vote while the fork is a `draft`.
   - The fork **opens**, and `0001` is frozen, when its first patch is admitted.
-  - A fork is `done` when its criteria are met, and after that it takes bug fixes only. It is `merged` when upstream takes it, `superseded` when upstream does the same thing another way, and `stale` after three missed syncs.
+  - A fork is `done` when its criteria are met, and after that it takes bug fixes only. It is `merged` when upstream takes it, and `superseded` when upstream does the same thing another way.
   - Records after `0001` are frozen as soon as they are adopted. To change one, adopt a new record that supersedes it.
   - Changing a frozen `0001` means a new child fork.
 
@@ -36,7 +36,7 @@ The bot keeps the tally in a comment on the PR and updates it on every vote and 
 
 Membership is open. Comment `/join <fork>` or `/leave <fork>` on any issue in this repository, and the bot updates the fork's `fork.json`. It also adds you to the fork's GitHub team, which can push to the fork's branches.
 
-Joining gives you a vote on the fork's decisions. It also puts you in the fork's rotation and among its reviewers: membership is how the work gets shared, and a vote comes with a turn.
+Joining gives you a vote on the fork's decisions, lets you sync it, and makes you one of the people the bot asks to review its patches and syncs.
 
 ## Getting a patch in
 
@@ -49,29 +49,43 @@ Joining gives you a vote on the fork's decisions. It also puts you in the fork's
 5. **Duplicates:** when members have written the same thing, decide which one to build on as a record (the open questions in `0001` say where this applies). The other author reviews it and ports across anything theirs did better.
 6. **Out of scope** doesn't mean bad: the patch may belong in a child fork or a combination fork.
 
-## The weekly sync
+## Syncing
 
-Every Monday at 06:00 UTC, the bot rebases each fork onto the **sync point**, which is upstream's `main` at that moment. The exception is a branch whose base is `pinned-by:`, such as `pbr-engine`'s craft-libs branch, which rebases onto the revision the named apps pin.
+A sync rebases a fork onto upstream. There is no schedule: **any member syncs a fork when they want it current**, by commenting `/sync <fork>` on any issue here, or by running the `sync` workflow. A sync is two jobs done by two people, and each is credited to whoever does it.
 
-- **Clean (`sync:clean`).** Every patch re-applied. The bot opens an issue assigned to **this week's rebaser**, who runs the repository's checks on the sync branch and comments `/promote` if they pass.
-- **Conflict (`sync:conflict`).** The bot pushes what applied and stops at the first conflicting patch. The rebaser resolves it on the sync branch, following the issue's instructions, and comments `/ready`. The bot posts the `git range-diff` and assigns **this week's reviewer**, who reviews only the resolution and comments `/promote`. A conflict resolution is the easiest place to hide something, so whoever resolved a sync can't promote it.
-- **Already upstream.** A patch that becomes empty when re-applied has been merged upstream. It is dropped and listed in the issue.
-- **Promote.** The bot tags the old head `archive/<fork>/<date>` and force-pushes the sync branch to `fork/<id>` with a lease.
-- **Don't merge into a fork while its sync issue is open.** The bot refuses to promote over commits it didn't rebase. If you do merge, close the issue and run the sync again.
-- **The cascade.** A child fork syncs after its parent is promoted, onto the parent's new head.
+**1. The sync.** The bot rebases every branch of the fork onto the **sync point**, which is upstream's `main` at that moment. The exception is a branch whose base is `pinned-by:`, such as `pbr-engine`'s craft-libs branch, which rebases onto the revision the named apps pin. The bot then opens a sync issue.
+- **Clean (`sync:clean`):** every patch re-applied, and the sync is ready to test and review.
+- **Conflict (`sync:conflict`):** the bot stops at the first conflicting patch. A member resolves it on the sync branch, following the issue's instructions, and comments `/ready`. Usually that's the member who started the sync, but it can be anyone. The bot then continues with the fork's remaining branches.
+- **Already upstream:** a patch that becomes empty when re-applied has been merged upstream. It is dropped and listed in the issue.
+
+**2. The test and review.** Once nothing conflicts, the bot asks a member at random to test and review the sync. **Any member other than whoever synced or resolved it may do it instead.** They:
+1. run the repository's checks (`pilot.json`) on the sync branch;
+2. read the `git range-diff` the bot posts, which compares every patch before and after. A conflict resolution needs the closest reading, because it is the easiest place to hide something.
+3. comment `/promote`. This attests that both passed.
+
+The bot then tags the old heads `archive/<fork>/<stamp>` and force-pushes the sync branches to `fork/<id>`.
+
+**Other rules:**
+- **One open sync per fork.** Finish it, or close it, before starting another.
+- **Don't merge into a fork while its sync is open.** The bot refuses to promote over commits it didn't rebase. If you do merge, close the issue and sync again.
+- **Parents first.** A child fork syncs onto its parents' promoted heads, so it can't sync while a parent's sync is open. When a parent is promoted, the bot says which children are now behind, and any of their members can `/sync` them.
 - **The metadata commit.** Each fork branch's top commit is `pilot: fork metadata`. It carries the CODEOWNERS file, and, for a fork that pins a parent's craft-libs, the redirected dependencies. The bot drops it and writes it again on every sync, so upstream bumping its own pin never conflicts. Don't put anything else in it.
 
-We sync weekly because the storytold case study found that a fork weeks behind isn't usable, while rebasing more often costs more: weekly costs about 1.5× a single rebase at the end, and daily 4.3×.
+**When to sync.** Sync when you need the fork current: before building on it, before testing a patch against today's upstream, or when a parent has moved. Syncing more often isn't free. In the storytold case study, syncing daily cost about 4.3× what a single rebase at the end costs, and weekly about 1.5×, because upstream keeps rewriting the same lines.
 
-## The rotation
+## Credit
 
-Each fork's members take turns, in the order `fork.json` lists them, counted from the week number. The week's **rebaser** is member *w* mod *n*, and its **reviewer** is member *w*+1 mod *n*. `pilot.py rota` prints this week's and next week's turns.
+`pilot.py ledger` counts, for each member:
 
-- **Swap** by saying so in the sync issue and reassigning it.
-- If a sync issue has had no movement after three days, the next member in the rotation may take it.
-- A fork with fewer than two members can't promote a conflicted sync.
+| Column | Credited to |
+|---|---|
+| patches | the author of each admitted patch |
+| reviews | each approving reviewer of an admitted patch |
+| syncs | whoever started a promoted sync |
+| resolutions | whoever resolved each conflicted branch of a promoted sync |
+| sync reviews | whoever tested, reviewed and promoted a sync |
 
-`pilot.py ledger` counts each member's admitted patches, reviews, syncs and sync reviews, so everyone can see who is carrying what.
+A sync counts only once it has been promoted. A sync with nothing to do opens no issue and earns nothing. Clean syncs are mostly the bot's work, while resolutions and sync reviews are people's. How much each column is worth is for the members to decide, as a process vote.
 
 ## Agents
 
@@ -88,6 +102,7 @@ Patches stay upstream-ready: they follow the project's own conventions, docs and
 While the pilot is being tried out by one person, `pilot.json` has `review.solo` on:
 - patches need no approvals;
 - a vote passes on one yes with no waiting;
+- whoever syncs or resolves a sync may also promote it;
 - `/join` is refused.
 
 `pilot.py check` fails as soon as solo is on and a fork has a second member. Ending the solo phase is the first process vote: it sets `review.approvals` to 2 and `votes` to at least 48 hours and a quorum of 3, which `pilot.py check` requires outside the solo phase.
@@ -106,4 +121,5 @@ The pilot is a manual version of Collective's forks. At the end, we want to know
 - **Decisions:** how long votes took, how often a no with a reason changed a proposal, and whether open questions were settled before the code was written.
 - **Scope:** whether the wide `web-host` fork stayed judgeable, or wanted to split. Its four areas are its labels.
 - **Stacking:** what the `pbr-engine` cascade cost each integration fork.
+- **On-demand syncs:** how far behind upstream forks drifted with nobody scheduled to sync them, who synced, and whether credit was enough to get syncs tested and reviewed.
 - **Use:** who builds from a fork branch, and who has stopped carrying their own patch.

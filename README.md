@@ -5,7 +5,7 @@
 Many good changes to the Craft apps sit as open pull requests, and the people who want them each carry their own copy. Often several people write the same feature independently. A Craft Collective fork is one place for one such feature:
 - a written goal and its decisions, adopted by vote;
 - one branch per repository it changes;
-- members who review patches into it and take turns rebasing it onto upstream every week.
+- members who review patches into it and sync it with upstream on demand, each credited with the work they do.
 
 Nobody here is a gatekeeper: the members decide, and a bot carries out what they decide. This is a by-hand pilot of [Collective](https://collective.software)'s forks.
 
@@ -21,7 +21,7 @@ All five are drafts. Their open questions are listed at the end of each founding
 
 ## Start here
 
-- **People:** read [PROCESS.md](PROCESS.md). It covers how decisions, patches, reviews and the weekly sync work, and what a member signs up for.
+- **People:** read [PROCESS.md](PROCESS.md). It covers how decisions, patches, reviews and syncs work, and how credit is counted.
 - **Agents:** read [AGENTS.md](AGENTS.md). It covers where to look before writing code, what to send where, and the rules the bot enforces.
 
 ## Using a fork
@@ -40,7 +40,8 @@ git switch -c my-patch        # … then open a PR against fork/web-host
 | Propose a decision | Open a PR adding `forks/<fork>/adr/NNNN-<slug>.md` |
 | Propose a fork | Open a PR adding `forks/<id>/fork.json` and `forks/<id>/adr/0001-<slug>.md` |
 | Vote | Comment `/vote yes` or `/vote no <reason>` on the PR |
-| Take your sync turn | Follow the sync issue the bot assigns you, then comment `/ready` or `/promote` |
+| Sync a fork | Comment `/sync <fork>` on any issue here; resolve any conflict and comment `/ready` |
+| Test and review a sync | Run the checks on the sync branch, read the range-diff, comment `/promote` |
 
 The pilot is in its **solo phase** while its founder tries the whole cycle on both forks, so joining opens when it ends (PROCESS.md).
 
@@ -52,13 +53,12 @@ The pilot is in its **solo phase** while its founder tries the whole cycle on bo
 |---|---|---|
 | `votes` | On PRs, `/vote`, `/join` and `/leave`, and hourly | Tallies votes, merges what passes, updates membership |
 | `apply` | When a fork or `pilot.json` changes on `main` | Makes the org's teams, branches and rules match |
-| `sync` | Mondays 06:00 UTC | Rebases every fork onto upstream, opening a sync issue |
-| `commands` | `/ready` or `/promote` on a sync issue | Checks a conflict resolution, or promotes a sync |
+| `sync` | When run by hand for a fork | The same as `/sync`, credited to whoever ran it |
+| `commands` | `/sync <fork>` on any issue; `/ready` or `/promote` on a sync issue | Syncs a fork, checks a conflict resolution, or promotes a sync |
 | `reviewers` | Hourly | Assigns two reviewers to each new patch PR |
 | `check` | Every push | Validates the configuration and runs the tests |
 
 Locally:
-- `pilot.py rota` prints whose turn it is.
 - `pilot.py ledger` counts who has done what.
 - `--dry-run` prints what any command would do on GitHub, without doing it.
 - `python3 -m unittest discover -s scripts` runs the tests.

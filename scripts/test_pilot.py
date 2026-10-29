@@ -17,23 +17,20 @@ import pilot  # noqa: E402
 
 
 class Rules(unittest.TestCase):
-    def test_rota_turns_over_weekly(self):
+    def test_a_sync_is_reviewed_by_someone_who_didnt_do_it(self):
         members = ["a", "b", "c"]
-        self.assertEqual(pilot.rota(members, 0), ("a", "b"))
-        self.assertEqual(pilot.rota(members, 2), ("c", "a"))
-        self.assertEqual(pilot.rota(["a"], 7), ("a", None))
-        self.assertEqual(pilot.rota([], 7), (None, None))
+        picked = pilot.sync_reviewer(members, "2026-11-02-1630", {"a"})
+        self.assertIn(picked, ["b", "c"])
+        self.assertEqual(picked, pilot.sync_reviewer(members, "2026-11-02-1630", {"a"}))
+        self.assertEqual(pilot.sync_reviewer(members, "x", {"a", "b"}), "c")
+        self.assertIsNone(pilot.sync_reviewer(["a"], "x", {"a"}))
 
-    def test_week_starts_on_monday(self):
-        monday = datetime.date(2026, 11, 2)
-        self.assertEqual(pilot.week_number(monday), pilot.week_number(monday + datetime.timedelta(days=6)))
-        self.assertEqual(pilot.week_number(monday) + 1, pilot.week_number(monday + datetime.timedelta(days=7)))
-
-    def test_sync_reviewer_is_never_the_resolver(self):
-        members = ["a", "b", "c"]
-        self.assertEqual(pilot.sync_reviewer(members, 0, "a"), "b")
-        self.assertEqual(pilot.sync_reviewer(members, 0, "b"), "c")
-        self.assertIsNone(pilot.sync_reviewer(["a"], 0, "a"))
+    def test_credit_goes_to_who_did_the_work_once_promoted(self):
+        state = {"syncer": "a", "promoter": "c",
+                 "branches": [{"status": "promoted", "resolver": "b"}, {"status": "promoted"}]}
+        self.assertEqual(pilot.sync_credit(state),
+                         [("a", "syncs"), ("b", "resolutions"), ("c", "sync reviews")])
+        self.assertEqual(pilot.sync_credit({**state, "promoter": None}), [])
 
     def test_patch_reviewers_exclude_the_author_and_repeat(self):
         members = ["a", "b", "c", "d"]
@@ -186,8 +183,6 @@ class FakeGitHub(pilot.GitHub):
     def close_issue(self, number, comment):
         self.calls.append(("close", number, comment))
 
-    def dispatch_sync(self, fork_id):
-        self.calls.append(("dispatch", fork_id))
 
 
 class Sync(unittest.TestCase):
@@ -275,7 +270,9 @@ class Sync(unittest.TestCase):
 
     def sync(self, fork_id, date="2026-11-02"):
         fork = pilot.fork_by_id(self.cfg, fork_id)
-        return pilot.sync_fork(self.gh, fork, self.work / fork_id / date, date, refresh_lock=False)
+        records = pilot.sync_fork(self.gh, fork, self.work / fork_id / date, date, refresh_lock=False)
+        self.range_diffs = pilot.take_range_diffs(records)
+        return records
 
     def test_engine_syncs_onto_the_revision_the_apps_pin(self):
         self.admit("craft-libs", "fork/engine", {"pbr.rs": "pub fn shade() {}\n"}, "craft-pbr")
@@ -315,7 +312,7 @@ class Sync(unittest.TestCase):
         [record] = self.sync("app-int")
         self.assertEqual(record["status"], "conflict")
         self.assertEqual(record["files"], ["a.txt"])
-        state = {"fork": "app-int", "date": "2026-11-02", "week": 0, "rebaser": "a", "reviewer": "b",
+        state = {"fork": "app-int", "date": "2026-11-02", "syncer": "a", "reviewer": None,
                  "branches": [record]}
         body = pilot.render_issue(self.gh, pilot.fork_by_id(self.cfg, "app-int"), state)
         self.assertEqual(pilot.read_state(body), state)
@@ -340,7 +337,7 @@ class Sync(unittest.TestCase):
         resolved = state["branches"][0]
         self.assertEqual(resolved["status"], "resolved")
         self.assertEqual(resolved["resolver"], "a")
-        self.assertEqual(state["reviewer"], "b")
+        self.assertEqual(state["reviewer"], "b")  # the only member who neither synced nor resolved
         self.assertEqual(self.show("org", "app", record["sync"], "a.txt"), "UNO\ntwo\nthree")
         self.assertIn("range-diff", self.gh.calls[-1][2])
 
@@ -353,12 +350,27 @@ class Sync(unittest.TestCase):
         self.assertEqual(self.ref("org", "app", "archive/app-int/2026-11-02"), old_head)
         self.assertEqual(self.gh.calls[-1][0], "close")
 
+    def test_the_syncer_cant_promote_a_clean_sync(self):
+        self.admit("app", "fork/app-int", {"b.txt": "bee\n"}, "add b")
+        self.commit(self.app, {"c.txt": "sea\n"}, "upstream moves")
+        sh(self.app, "git", "push", "-q", "origin", "HEAD:main")
+        [record] = self.sync("app-int")
+        self.assertEqual(record["status"], "clean")
+        self.assertEqual(self.range_diffs[0][0], "app")
+        self.assertIn("add b", self.range_diffs[0][1])
+        state = {"fork": "app-int", "date": "2026-11-02", "syncer": "a", "branches": [record]}
+        fork = pilot.fork_by_id(self.cfg, "app-int")
+        with self.assertRaisesRegex(pilot.SyncError, "ran this sync"):
+            pilot.promote(self.gh, fork, state, types.SimpleNamespace(issue=1, user="a", no_lock=True))
+        pilot.promote(self.gh, fork, state, types.SimpleNamespace(issue=1, user="b", no_lock=True))
+        self.assertEqual(pilot.sync_credit(state), [("a", "syncs"), ("b", "sync reviews")])
+
     def test_promote_refuses_when_the_fork_moved(self):
         self.admit("app", "fork/app-int", {"b.txt": "bee\n"}, "add b")
         self.commit(self.app, {"c.txt": "sea\n"}, "upstream moves")
         sh(self.app, "git", "push", "-q", "origin", "HEAD:main")
         [record] = self.sync("app-int")
-        state = {"fork": "app-int", "date": "2026-11-02", "week": 0, "branches": [record]}
+        state = {"fork": "app-int", "date": "2026-11-02", "syncer": "b", "branches": [record]}
         self.admit("app", "fork/app-int", {"d.txt": "dee\n"}, "merged during the sync")
         fork = pilot.fork_by_id(self.cfg, "app-int")
         with self.assertRaisesRegex(pilot.SyncError, "new commits"):

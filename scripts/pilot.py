@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The pilot's bot: weekly syncs, the /ready and /promote commands, votes on decisions,
-membership, reviewer assignment, the rotation and the ledger. PROCESS.md is the rulebook;
+"""The pilot's bot: on-demand syncs with /sync, /ready and /promote, votes on decisions,
+membership, reviewer assignment and the ledger of who did what. PROCESS.md is the rulebook;
 this enforces it.
 
 Runs in GitHub Actions with GH_TOKEN set to a token that can push to the org's repositories,
@@ -23,8 +23,6 @@ ROOT = Path(__file__).resolve().parent.parent
 METADATA_SUBJECT = "pilot: fork metadata"
 STATE_RE = re.compile(r"<!-- pilot-sync (\{.*?\}) -->", re.S)
 REV_RE = re.compile(r'\brev\s*=\s*"([0-9a-f]{7,40})"')
-# Weeks are counted from a Monday, so the rotation turns over on sync day.
-EPOCH_MONDAY = datetime.date(1970, 1, 5)
 MAX_COMMENT = 60000
 
 
@@ -147,32 +145,7 @@ def validate(cfg, root=None):
 
 
 # ---------------------------------------------------------------------------------------------
-# The rotation
-
-
-def week_number(day):
-    return (day - EPOCH_MONDAY).days // 7
-
-
-def rota(members, week):
-    """(rebaser, reviewer) for a week. The reviewer is None when there is only one member."""
-    if not members:
-        return None, None
-    n = len(members)
-    return members[week % n], (members[(week + 1) % n] if n > 1 else None)
-
-
-def sync_reviewer(members, week, resolver):
-    """The week's reviewer, or the next member after them who isn't the resolver."""
-    _, reviewer = rota(members, week)
-    if reviewer is None:
-        return None
-    start = members.index(reviewer)
-    for i in range(len(members)):
-        m = members[(start + i) % len(members)]
-        if m != resolver:
-            return m
-    return None
+# Reviewers
 
 
 def patch_reviewers(members, author, key, k):
@@ -330,9 +303,6 @@ class GitHub:
     def close_issue(self, number, comment):
         self.gh("issue", "close", str(number), "-R", self.pilot, "--comment", comment)
 
-    def dispatch_sync(self, fork_id):
-        self.gh("workflow", "run", "sync.yml", "-R", self.pilot, "-f", f"fork={fork_id}")
-
     def push(self, wd, *args):
         git(wd, "push", *args)
 
@@ -363,9 +333,6 @@ class DryGitHub(GitHub):
 
     def close_issue(self, number, comment):
         self._say("close issue", number, comment)
-
-    def dispatch_sync(self, fork_id):
-        self._say("dispatch sync of", fork_id)
 
     def edit_comment(self, comment_id, body):
         self._say("edit comment", comment_id)
@@ -543,6 +510,8 @@ def sync_branch(gh, fork, branch, workroot, date, heads, refresh_lock=True):
     else:
         state.update(status="clean", head=write_metadata(gh, fork, wd, targets, refresh_lock))
         heads[repo] = state["head"]
+        state["_range_diff"] = git(wd, "range-diff", "--no-color", f"{old_base}..{old_head}",
+                                   f"{new_base}..{state['head']}")
     gh.push(wd, "--force", "origin", f"HEAD:refs/heads/{sync_ref}")
     return state
 
@@ -568,10 +537,10 @@ def sync_fork(gh, fork, workroot, date, refresh_lock=True, start=0, prior=None):
 def render_issue(gh, fork, state):
     org = gh.cfg["org"]
     adr = f"https://github.com/{gh.pilot}/tree/main/{fork['adr']}"
-    lines = [f"Weekly sync of **{fork['id']}** ([ADR]({adr})), {state['date']}.", ""]
-    lines.append(f"Rebaser: @{state['rebaser']}" if state.get("rebaser") else "Rebaser: nobody (no members)")
+    lines = [f"Sync of **{fork['id']}** ([records]({adr})), started by @{state['syncer']} at {state['date']}.", ""]
     if state.get("reviewer"):
-        lines.append(f"Reviewer of any conflict resolution: @{state['reviewer']}")
+        lines.append(f"Asked to test and review: @{state['reviewer']}. Any member except whoever synced "
+                     "or resolved it may do it instead; whoever does gets the credit.")
     lines.append("")
     for r in state["branches"]:
         repo_url = f"https://github.com/{org}/{r['repo']}"
@@ -590,7 +559,7 @@ def render_issue(gh, fork, state):
             files = ", ".join(f"`{f}`" for f in r["files"])
             lines += [
                 "",
-                f"Patch {repo_url}/commit/{r['conflict']} conflicts in {files}. To resolve:",
+                f"Patch {repo_url}/commit/{r['conflict']} conflicts in {files}. Any member may resolve it:",
                 "```sh",
                 f"git fetch origin {r['branch']} {r['sync']}",
                 f"git switch -c {r['sync']} origin/{r['sync']}",
@@ -601,11 +570,11 @@ def render_issue(gh, fork, state):
                 f"Leave out the `{METADATA_SUBJECT}` commit; the bot writes it. Then comment `/ready`.",
             ]
         if r["status"] == "resolved":
-            lines.append(f"Resolved by @{r['resolver']}. Check the range-diff below, then a member other "
-                         "than the resolver comments `/promote`.")
-        if r["status"] == "clean":
+            lines.append(f"Resolved by @{r['resolver']}.")
+        if r["status"] in ("clean", "resolved"):
             check = gh.cfg["repos"][r["repo"]]["check"]
-            lines += ["", f"Run `{check}` on the sync branch; comment `/promote` if it passes."]
+            lines += ["", f"To test and review: run `{check}` on the sync branch and read the range-diff "
+                          "(posted below), including every conflict resolution. Comment `/promote` if both pass."]
         lines.append("")
     lines.append(f"<!-- pilot-sync {json.dumps(state, sort_keys=True)} -->")
     return "\n".join(lines)
@@ -628,58 +597,84 @@ def status_label(state):
 SYNC_LABELS = ("sync:clean", "sync:conflict", "sync:resolved")
 
 
+def sync_stamp(now):
+    """Names one sync: syncs are on demand, so several can happen in a day."""
+    return now.strftime("%Y-%m-%d-%H%M")
+
+
+def range_diff_comment(rds):
+    parts = [f"<details><summary>git range-diff: {repo}</summary>\n\n```diff\n{rd}\n```\n</details>"
+             for repo, rd in rds]
+    return "\n\n".join(parts)
+
+
+def take_range_diffs(branches):
+    return [(b["repo"], b.pop("_range_diff")) for b in branches if "_range_diff" in b]
+
+
 def cmd_sync(gh, args):
+    """Syncs one fork on demand, for the member who asked; that member is credited with it."""
     cfg = gh.cfg
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    week = week_number(today)
-    forks = [fork_by_id(cfg, args.fork)] if args.fork else fork_order(cfg)
-    syncing = set()
-    for fork in forks:
-        if fork["status"] in ("merged", "superseded"):
-            continue
-        waiting = [p for p in fork["parents"] if p in syncing or gh.open_sync_issue(p)]
-        if waiting:
-            print(f"{fork['id']}: waits for {', '.join(waiting)} to be promoted")
-            syncing.add(fork["id"])
-            continue
-        existing = gh.open_sync_issue(fork["id"])
-        if existing:
-            gh.comment(existing, "A new sync point has passed and this sync is still open. "
-                                 "It needs finishing before the fork can sync again.")
-            syncing.add(fork["id"])
-            continue
-        rebaser, reviewer = rota(fork["members"], week)
-        with tempfile.TemporaryDirectory() as workroot:
-            try:
-                branches = sync_fork(gh, fork, workroot, today.isoformat(), refresh_lock=not args.no_lock)
-            except SyncError as e:
-                gh.create_issue(f"Sync failed: {fork['id']}, {today}",
-                                f"The bot couldn't sync **{fork['id']}** and changed nothing:\n\n```\n{e}\n```",
-                                ["sync-failed", f"fork:{fork['id']}"], [rebaser] if rebaser else [])
-                syncing.add(fork["id"])
-                continue
-        if all(b["status"] == "current" for b in branches):
-            print(f"{fork['id']}: current")
-            continue
-        state = {"fork": fork["id"], "date": today.isoformat(), "week": week,
-                 "rebaser": rebaser, "reviewer": reviewer, "branches": branches}
-        url = gh.create_issue(f"Sync {fork['id']}, {today}", render_issue(gh, fork, state),
-                              ["sync", f"fork:{fork['id']}", status_label(state)],
-                              [rebaser] if rebaser else [])
-        print(f"{fork['id']}: {status_label(state)} {url}")
-        syncing.add(fork["id"])
+    fork = fork_by_id(cfg, args.fork)
+    user = args.user
+    if user not in fork["members"]:
+        raise SyncError(f"@{user} isn't a member of {fork['id']}; `/join {fork['id']}` first")
+    if fork["status"] in ("merged", "superseded"):
+        raise SyncError(f"{fork['id']} is {fork['status']}; there is nothing to sync")
+    waiting = [p for p in fork["parents"] if gh.open_sync_issue(p)]
+    if waiting:
+        raise SyncError(f"{fork['id']} syncs onto its parents' promoted heads; "
+                        f"finish the open sync of {', '.join(waiting)} first")
+    existing = gh.open_sync_issue(fork["id"])
+    if existing:
+        raise SyncError(f"{fork['id']} already has an open sync, #{existing}; finish that one first")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stamp = sync_stamp(now)
+    with tempfile.TemporaryDirectory() as workroot:
+        branches = sync_fork(gh, fork, workroot, stamp, refresh_lock=not args.no_lock)
+    rds = take_range_diffs(branches)
+    if all(b["status"] == "current" for b in branches):
+        print(f"{fork['id']} is already current; nothing to sync")
+        return None
+    state = {"fork": fork["id"], "date": stamp, "syncer": user, "branches": branches}
+    conflicted = status_label(state) == "sync:conflict"
+    state["reviewer"] = None if conflicted else sync_reviewer(fork["members"], stamp, {user})
+    assignees = [user] + ([state["reviewer"]] if state["reviewer"] else [])
+    url = gh.create_issue(f"Sync {fork['id']}, {stamp}", render_issue(gh, fork, state),
+                          ["sync", f"fork:{fork['id']}", status_label(state)], assignees)
+    number = int(str(url).rstrip("/").split("/")[-1]) if str(url).rstrip("/").split("/")[-1].isdigit() else None
+    if rds and number:
+        gh.comment(number, range_diff_comment(rds))
+    print(f"{fork['id']}: {status_label(state)} {url}")
+    return state
+
+
+def sync_reviewer(members, stamp, exclude):
+    """A member to ask to test and review a sync, at random but repeatably; never someone who
+    synced or resolved it. None when the fork has nobody else."""
+    eligible = [m for m in members if m not in exclude]
+    picked = patch_reviewers(eligible, "", f"sync:{stamp}", 1)
+    return picked[0] if picked else None
 
 
 def cmd_command(gh, args):
-    """Handles /ready and /promote comments on a sync issue."""
+    """Handles /sync <fork> on any issue, and /ready and /promote on a sync issue."""
     cfg = gh.cfg
-    issue = gh.issue(args.issue)
     try:
+        words = args.body.strip().split()
+        word = words[0] if words else ""
+        if word == "/sync":
+            if len(words) < 2:
+                raise SyncError("say which fork: `/sync <fork>`")
+            state = cmd_sync(gh, argparse.Namespace(fork=words[1], user=args.user, no_lock=args.no_lock))
+            if state is None:
+                gh.comment(args.issue, f"{words[1]} is already current with upstream; nothing to sync.")
+            return
+        issue = gh.issue(args.issue)
         state = read_state(issue["body"])
         fork = fork_by_id(cfg, state["fork"])
         if args.user not in fork["members"]:
             raise SyncError(f"@{args.user} isn't a member of {fork['id']}")
-        word = args.body.strip().split()[0] if args.body.strip() else ""
         if word == "/ready":
             ready(gh, fork, state, args)
         elif word == "/promote":
@@ -709,37 +704,48 @@ def ready(gh, fork, state, args):
         new_head = write_metadata(gh, fork, wd, targets, refresh_lock=not args.no_lock)
         gh.push(wd, f"--force-with-lease=refs/heads/{r['sync']}:{head}", "origin",
                 f"HEAD:refs/heads/{r['sync']}")
-        old = f"{r['old_base']}..{r['old_head']}"
-        rd = git(wd, "range-diff", "--no-color", old, f"{r['new_base']}..{new_head}")
+        rds = [(r["repo"], git(wd, "range-diff", "--no-color", f"{r['old_base']}..{r['old_head']}",
+                               f"{r['new_base']}..{new_head}"))]
     r.update(status="resolved", resolver=args.user, head=new_head, pins=targets)
     for key in ("conflict", "files", "remaining"):
         r.pop(key, None)
 
     # Carry on with the branches after this one, which may conflict in turn.
-    prior = state["branches"][: i + 1]
     if any(b["status"] == "pending" for b in state["branches"]):
         with tempfile.TemporaryDirectory() as workroot:
             state["branches"] = sync_fork(gh, fork, workroot, state["date"], not args.no_lock,
-                                          start=i + 1, prior=prior)
+                                          start=i + 1, prior=state["branches"][: i + 1])
+        rds += take_range_diffs(state["branches"])
 
-    reviewer = sync_reviewer(fork["members"], state["week"], args.user)
-    state["reviewer"] = reviewer
+    done = status_label(state) != "sync:conflict"
+    if done:
+        exclude = {state["syncer"]} | {b["resolver"] for b in state["branches"] if b.get("resolver")}
+        state["reviewer"] = sync_reviewer(fork["members"], state["date"], exclude)
     gh.edit_issue(args.issue, body=render_issue(gh, fork, state),
                   add_labels=[status_label(state)],
                   remove_labels=[x for x in SYNC_LABELS if x != status_label(state)],
-                  assignees=[reviewer] if reviewer else [])
-    who = f"@{reviewer}, please review" if reviewer else "This fork needs a second member to review"
-    gh.comment(args.issue, f"{who} the resolution in {r['repo']}: only the hunks that changed "
-                           "against the patches as they were.\n\n<details><summary>git range-diff</summary>\n\n"
-                           f"```diff\n{rd}\n```\n</details>")
+                  assignees=[state["reviewer"]] if done and state.get("reviewer") else [])
+    if done:
+        who = (f"@{state['reviewer']}, please test and review it" if state.get("reviewer")
+               else "This fork needs another member to test and review it")
+        gh.comment(args.issue, f"Resolved. {who}: run the checks, and read the resolution, which is "
+                               "the hunks that changed against the patches as they were.\n\n"
+                               + range_diff_comment(rds))
+    else:
+        gh.comment(args.issue, "Resolved; the next branch conflicts too (above).\n\n" + range_diff_comment(rds))
 
 
 def promote(gh, fork, state, args):
+    """The test-and-review: whoever promotes attests that the checks pass and the range-diff
+    holds, and is credited with it. It can't be someone who synced or resolved this sync."""
+    solo = gh.cfg["review"].get("solo")
     for r in state["branches"]:
         if r["status"] in ("conflict", "pending"):
             raise SyncError(f"{r['repo']} is still {r['status']}")
-        if r["status"] == "resolved" and r["resolver"] == args.user and not gh.cfg["review"].get("solo"):
-            raise SyncError(f"@{args.user} resolved {r['repo']}; another member has to promote it")
+        if r["status"] == "resolved" and r["resolver"] == args.user and not solo:
+            raise SyncError(f"@{args.user} resolved {r['repo']}; another member has to test and review it")
+    if state["syncer"] == args.user and not solo:
+        raise SyncError(f"@{args.user} ran this sync; another member has to test and review it")
     org = gh.cfg["org"]
     with tempfile.TemporaryDirectory() as workroot:
         pushes = []
@@ -754,7 +760,7 @@ def promote(gh, fork, state, args):
                 raise SyncError(f"{r['sync']} has moved since it was checked; comment /ready again")
             if remote.get(f"refs/heads/{r['branch']}") != r["old_head"]:
                 raise SyncError(f"{r['branch']} in {r['repo']} has new commits since the sync started. "
-                                "Don't merge into a fork while it syncs; close this issue and run the sync again.")
+                                "Don't merge into a fork while it syncs; close this issue and sync again.")
             pushes.append((r, url))
         for r, url in pushes:
             wd = Path(workroot) / r["repo"]
@@ -767,10 +773,13 @@ def promote(gh, fork, state, args):
             r["status"] = "promoted"
     state["promoter"] = args.user
     gh.edit_issue(args.issue, body=render_issue(gh, fork, state))
-    gh.close_issue(args.issue, f"Promoted by @{args.user}. The old heads are tagged "
-                               f"`archive/{fork['id']}/{state['date']}`.")
-    for child in children(gh.cfg, fork["id"]):
-        gh.dispatch_sync(child)
+    message = (f"Tested, reviewed and promoted by @{args.user}. The old heads are tagged "
+               f"`archive/{fork['id']}/{state['date']}`.")
+    kids = children(gh.cfg, fork["id"])
+    if kids:
+        message += ("\n\nThese forks build on this one and are now behind it: "
+                    + ", ".join(f"`{k}`" for k in kids) + ". Any of their members can `/sync` them.")
+    gh.close_issue(args.issue, message)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1036,7 +1045,7 @@ def set_fork(gh, fork_id, mutate, message):
 
 def cmd_member(gh, args):
     """`/join <fork>` and `/leave <fork>` on an issue. Membership is open: joining takes on the
-    fork's rotation and gives a vote on its decisions."""
+    fork's reviewers and gives a vote on its decisions."""
     try:
         words = args.body.strip().split()
         if len(words) < 2 or words[0] not in ("/join", "/leave"):
@@ -1050,8 +1059,8 @@ def cmd_member(gh, args):
                 raise SyncError(f"@{user} is already a member of {fork['id']}")
             check_account(gh, user)
             set_fork(gh, fork["id"], lambda f: f["members"].append(user), f"{fork['id']}: @{user} joins")
-            gh.comment(args.issue, f"Welcome to {fork['id']}, @{user}. You're in the rotation from "
-                                   "next week.")
+            gh.comment(args.issue, f"Welcome to {fork['id']}, @{user}. You can now `/sync` it, and "
+                                   "you'll be asked to review its patches and syncs.")
         else:
             if user not in fork["members"]:
                 raise SyncError(f"@{user} isn't a member of {fork['id']}")
@@ -1062,7 +1071,7 @@ def cmd_member(gh, args):
 
 
 # ---------------------------------------------------------------------------------------------
-# Setup, rota, ledger, check
+# Setup, ledger, check
 
 
 def cmd_setup(gh, args):
@@ -1155,22 +1164,29 @@ def cmd_setup(gh, args):
     print("Now run the sync workflow once per fork, in order, to write each branch's metadata commit.")
 
 
-def cmd_rota(gh, args):
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    week = week_number(today)
-    for fork in gh.cfg["forks"]:
-        for w, when in ((week, "this week"), (week + 1, "next week")):
-            rebaser, reviewer = rota(fork["members"], w)
-            print(f"{fork['id']:16} {when:10} rebaser {rebaser or '-':20} reviewer {reviewer or '-'}")
+LEDGER_COLUMNS = ["patches", "reviews", "syncs", "resolutions", "sync reviews"]
+
+
+def sync_credit(state):
+    """(user, column) credits for one sync. Only a promoted sync counts: the syncer for the
+    sync, each resolver for a conflict they resolved, and the promoter for testing and
+    reviewing it."""
+    if not state.get("promoter"):
+        return []
+    credits = [(state["syncer"], "syncs")]
+    credits += [(b["resolver"], "resolutions") for b in state["branches"] if b.get("resolver")]
+    credits.append((state["promoter"], "sync reviews"))
+    return credits
 
 
 def cmd_ledger(gh, args):
-    """Who has done what: admitted patches, patch reviews, syncs and sync reviews."""
+    """Who has done what: admitted patches, patch reviews, syncs, conflict resolutions, and
+    the tests and reviews of syncs."""
     cfg = gh.cfg
     counts = {}
 
     def add(user, column):
-        counts.setdefault(user, {"patches": 0, "reviews": 0, "syncs": 0, "sync reviews": 0})
+        counts.setdefault(user, dict.fromkeys(LEDGER_COLUMNS, 0))
         counts[user][column] += 1
 
     for fork in cfg["forks"]:
@@ -1189,16 +1205,11 @@ def cmd_ledger(gh, args):
             state = read_state(issue["body"])
         except SyncError:
             continue
-        resolvers = {r["resolver"] for r in state["branches"] if r.get("resolver")}
-        for user in resolvers or {state.get("promoter")}:
-            if user:
-                add(user, "syncs")
-        if resolvers and state.get("promoter"):
-            add(state["promoter"], "sync reviews")
-    columns = ["patches", "reviews", "syncs", "sync reviews"]
-    print(f"{'member':24}" + "".join(f"{c:>14}" for c in columns))
+        for user, column in sync_credit(state):
+            add(user, column)
+    print(f"{'member':24}" + "".join(f"{c:>14}" for c in LEDGER_COLUMNS))
     for user, c in sorted(counts.items()):
-        print(f"{user:24}" + "".join(f"{c[col]:>14}" for col in columns))
+        print(f"{user:24}" + "".join(f"{c[col]:>14}" for col in LEDGER_COLUMNS))
 
 
 def cmd_invites(gh, args):
@@ -1240,10 +1251,11 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true", help="print GitHub writes instead of making them")
     p.add_argument("--root", help="the pilot repository to read (default: this one)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("sync", help="sync every fork, or one")
-    s.add_argument("fork", nargs="?")
+    s = sub.add_parser("sync", help="sync a fork on demand, credited to --user")
+    s.add_argument("fork")
+    s.add_argument("--user", required=True, help="the member running the sync")
     s.add_argument("--no-lock", action="store_true", help="don't refresh Cargo.lock (no cargo needed)")
-    c = sub.add_parser("command", help="handle a /ready or /promote comment")
+    c = sub.add_parser("command", help="handle a /sync, /ready or /promote comment")
     c.add_argument("--issue", type=int, required=True)
     c.add_argument("--user", required=True)
     c.add_argument("--body", required=True)
@@ -1258,19 +1270,18 @@ def main(argv=None):
     m.add_argument("--body", required=True)
     sub.add_parser("assign", help="assign reviewers to new patch PRs")
     sub.add_parser("setup", help="create the org's forks, teams, branches and rules")
-    sub.add_parser("rota", help="print this week's and next week's turns")
     sub.add_parser("ledger", help="count each member's work")
     sub.add_parser("check", help="validate pilot.json and the forks")
     i = sub.add_parser("invites", help="print the invitations from invites/")
     i.add_argument("--fork")
     args = p.parse_args(argv)
-    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("GH_TOKEN") and args.cmd not in ("check", "rota"):
+    if os.environ.get("GITHUB_ACTIONS") and not os.environ.get("GH_TOKEN") and args.cmd not in ("check", "invites"):
         print("PILOT_TOKEN isn't set, so the bot does nothing yet (SETUP.md).")
         return
     cfg = load_config(args.root)
     gh = (DryGitHub if args.dry_run else GitHub)(cfg, os.environ.get("PILOT_GIT_BASE", "https://github.com"))
     handlers = {"sync": cmd_sync, "command": cmd_command, "assign": cmd_assign, "setup": cmd_setup,
-                "rota": cmd_rota, "ledger": cmd_ledger, "check": cmd_check, "invites": cmd_invites,
+                "ledger": cmd_ledger, "check": cmd_check, "invites": cmd_invites,
                 "vote": cmd_vote, "member": cmd_member}
     try:
         handlers[args.cmd](gh, args)

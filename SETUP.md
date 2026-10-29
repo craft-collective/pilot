@@ -9,6 +9,6 @@ This is done once, by an org owner. After that, the `apply` workflow keeps the o
    - makes each fork's team and branch, and protects `fork/*`;
    - protects this repository's `main`, so that only voted PRs reach it;
    - makes the labels.
-4. **Write each fork's metadata commit:** run the `sync` workflow for `pbr-engine` and promote it, which cascades to the three integration forks. Then run it for `web-host`.
+4. **Write each fork's metadata commit:** `/sync` each fork once, `pbr-engine` first. Once it is promoted, sync the three integration forks, then `web-host`.
 
 Upstream's own CI workflows don't run in the org's copies. Forks have Actions off by default, and the rebaser runs each repository's checks from `pilot.json` instead.
