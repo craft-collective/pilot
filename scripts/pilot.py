@@ -501,6 +501,23 @@ def pin_targets(gh, fork, branch, heads):
     return targets
 
 
+def set_cargo_env(path, deps):
+    """Tells the build where each pinned dependency now comes from (`CRAFT_LIBS_GIT` and
+    `CRAFT_LIBS_REV` for craft-libs), in .cargo/config.toml's [env] table, so that a check of
+    a dependency's source can accept the fork's without naming it in a patch."""
+    lines = "# Written by the pilot's metadata commit: where this fork's pinned dependencies come from.\n"
+    for name, (url, rev) in sorted(deps.items()):
+        lines += f'{name}_GIT = "{url}"\n{name}_REV = "{rev}"\n'
+    text = path.read_text() if path.exists() else ""
+    m = re.search(r"^\[env\][ \t]*\n", text, re.M)
+    if m:
+        text = text[:m.end()] + lines + text[m.end():]
+    else:
+        text += ("\n" if text.strip() else "") + "[env]\n" + lines
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+
+
 def write_metadata(gh, fork, wd, targets, refresh_lock=True):
     """Commits CODEOWNERS and the pins on top of the working tree's HEAD."""
     org = gh.cfg["org"]
@@ -508,7 +525,7 @@ def write_metadata(gh, fork, wd, targets, refresh_lock=True):
     codeowners.parent.mkdir(exist_ok=True)
     codeowners.write_text(f"# Written by {org}/pilot on every sync. Don't edit it here.\n"
                           f"* @{org}/{fork['id']}\n")
-    body = []
+    body, env = [], {}
     for dep_repo, rev in sorted(targets.items()):
         url = gh.url(gh.cfg["upstream_owner"], dep_repo)
         fork_url = gh.url(org, dep_repo)
@@ -523,7 +540,10 @@ def write_metadata(gh, fork, wd, targets, refresh_lock=True):
                 total += count
         if total == 0:
             raise SyncError(f"the branch pins {dep_repo} but no manifest depends on it")
+        env[dep_repo.upper().replace("-", "_")] = (fork_url, rev)
         body.append(f"pins {dep_repo} at {rev}")
+    if env:
+        set_cargo_env(wd / ".cargo" / "config.toml", env)
     if targets and refresh_lock and (wd / "Cargo.lock").exists():
         # Cargo rewrites the lock entries for the changed sources and keeps the rest.
         run(["cargo", "metadata", "--format-version", "1", "--quiet"], cwd=wd)

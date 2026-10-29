@@ -331,6 +331,16 @@ class Sync(unittest.TestCase):
         self.assertEqual(self.show("org", "craft-libs", "sync/engine/2026-11-02", ".github/CODEOWNERS").splitlines()[-1],
                          "* @org/engine")
 
+    def test_cargo_env_joins_an_existing_config(self):
+        path = Path(self.tmp.name) / "config.toml"
+        path.write_text('[alias]\nxtask = "run --package xtask --"\n\n[env]\nRUST_LOG = "warn"\n')
+        pilot.set_cargo_env(path, {"CRAFT_LIBS": ("https://github.com/org/craft-libs", "abc")})
+        text = path.read_text()
+        self.assertEqual(text.count("[env]"), 1)
+        self.assertIn('[env]\n# Written', text)
+        self.assertIn('CRAFT_LIBS_REV = "abc"\nRUST_LOG = "warn"\n', text)
+        self.assertTrue(text.startswith('[alias]\nxtask'))
+
     def test_a_first_sync_with_no_patches_shows_the_metadata_commit(self):
         [record] = self.sync("engine")
         self.assertEqual(record["status"], "clean")
@@ -353,6 +363,9 @@ class Sync(unittest.TestCase):
         manifest = self.show("org", "app", "sync/app-int/2026-11-02", "Cargo.toml")
         self.assertIn(f'git = "file://{self.base}/org/craft-libs", rev = "{engine_head}"', manifest)
         self.assertEqual(self.show("org", "app", "sync/app-int/2026-11-02", "a.txt"), "ONE\ntwo\nthree")
+        config = self.show("org", "app", "sync/app-int/2026-11-02", ".cargo/config.toml")
+        self.assertIn(f'[env]\n# Written', config)
+        self.assertIn(f'CRAFT_LIBS_GIT = "file://{self.base}/org/craft-libs"\nCRAFT_LIBS_REV = "{engine_head}"', config)
 
         # A second sync with nothing new reports the branch as current once it is promoted.
         self.gh.cfg["forks"][1]["branches"][0]["branch"] = "fork/app-int"
