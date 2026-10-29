@@ -304,6 +304,15 @@ class GitHub:
             return None
         return json.loads(r.stdout) if r.stdout.strip() else {}
 
+    def exists(self, path):
+        """Whether GitHub has `path`. Only a 404 means no: any other failure stops, so that setup
+        never makes something again because a lookup failed."""
+        self.auth()
+        r = subprocess.run(["gh", "api", "--silent", path], text=True, capture_output=True)
+        if r.returncode and "HTTP 404" not in r.stderr:
+            raise SyncError(f"gh api GET {path} failed: {r.stderr.strip()}")
+        return r.returncode == 0
+
     def gh(self, *args):
         self.auth()
         return run(["gh", *args]).stdout.strip()
@@ -619,7 +628,12 @@ def range_diff(wd, old, new):
 
     has_old, has_new = (bool(git(wd, "rev-list", "-1", r)) for r in (old, new))
     if has_old and has_new:
-        return git(wd, "range-diff", "--no-color", old, new)
+        rd = git(wd, "range-diff", "--no-color", old, new)
+        # A commit only on the new side, such as a branch's first metadata commit, is listed
+        # without its diff: show it in full, since every line of it is new to the reviewer.
+        added = re.findall(r"^-:\s+-+\s+>\s+\d+:\s+([0-9a-f]+)", rd, re.M)
+        return "\n\n".join([rd] + [git(wd, "show", "--no-color", "--format=commit %H%n%n    %s%n", sha)
+                                    for sha in added])
     if has_new:
         return "No patches before the sync. The commits after it:\n\n" + full(new)
     if has_old:
@@ -1202,7 +1216,7 @@ def cmd_setup(gh, args):
         bypass.append({"actor_id": cfg["app_id"], "actor_type": "Integration", "bypass_mode": "always"})
 
     for repo in cfg["repos"]:
-        if gh.api(f"repos/{org}/{repo}", check=False) is None:
+        if not gh.exists(f"repos/{org}/{repo}"):
             if gh.app:
                 raise SyncError(f"{org}/{repo} doesn't exist, and the App can't fork it: an org owner "
                                 "runs `pilot.py setup` once by hand (SETUP.md)")
@@ -1269,7 +1283,7 @@ def cmd_setup(gh, args):
 
     for fork in cfg["forks"]:
         team = fork["id"]
-        if gh.api(f"orgs/{org}/teams/{team}", check=False) is None:
+        if not gh.exists(f"orgs/{org}/teams/{team}"):
             act(f"team {team}", lambda: gh.api(f"orgs/{org}/teams", "POST",
                                                {"name": team, "privacy": "closed"}))
         for m in fork["members"]:
@@ -1279,7 +1293,7 @@ def cmd_setup(gh, args):
             repo = b["repo"]
             act(f"team {team}: push on {org}/{repo}",
                 lambda: gh.api(f"orgs/{org}/teams/{team}/repos/{org}/{repo}", "PUT", {"permission": "push"}))
-            if gh.api(f"repos/{org}/{repo}/git/ref/heads/{b['branch']}", check=False) is None:
+            if not gh.exists(f"repos/{org}/{repo}/git/ref/heads/{b['branch']}"):
                 if b["base"] == "main":
                     sha = gh.api(f"repos/{up}/{repo}/commits/main")["sha"]
                 else:
