@@ -1243,7 +1243,7 @@ def cmd_setup(gh, args):
                     "required_approving_review_count": cfg["review"]["approvals"],
                     "require_code_owner_review": cfg["review"]["approvals"] > 0,
                     "dismiss_stale_reviews_on_push": True,
-                    "require_last_push_approval": True,
+                    "require_last_push_approval": cfg["review"]["approvals"] > 0,
                     "required_review_thread_resolution": False,
                     "allowed_merge_methods": ["squash"]}},
             ]}))
