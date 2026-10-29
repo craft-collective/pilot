@@ -36,6 +36,22 @@ If a fork covers your task, build on its branch instead of on upstream `main`, a
 - **Don't merge into a fork while its sync issue is open.**
 - **A sync's tester and reviewer is someone else.** If you started or resolved a sync, you don't promote it.
 - **`/promote` is an attestation.** It says you ran the checks and read the range-diff. Don't comment it otherwise.
+- **Upstream merges only parity fixes.** Open an upstream PR only for a change that makes an app behave like the product it mirrors. Everything else, such as build, CI or fork support, stays a patch on the fork.
+
+## Forks that build against the org's craft-libs
+
+A fork that pins a parent's craft-libs (`pins` in its `fork.json`) builds its app against the org's copy of craft-libs, not storytold's. effectcraft, vectorcraft and deckcraft each have a `cargo xtask pdf-deps` check that requires storytold's. Two things make that check pass on these forks, so there is nothing for you to set up:
+- **The patch.** The fork branch carries the patch `xtask pdf-deps: a fork of craft-libs can name its own source`. It lets a build name craft-libs' source with `CRAFT_LIBS_GIT` and `CRAFT_LIBS_REV`. With neither set, the check is upstream's.
+- **The metadata commit.** It sets both variables in `.cargo/config.toml`'s `[env]` table on every sync, to the URL and commit it pins.
+
+What to do:
+- **Building or checking a fork branch:** run the checks as they are.
+- **Testing an app against your own craft-libs checkout:**
+  - point the app's craft-libs dependencies at it with `git = "file:///…"` and its full commit as `rev`;
+  - set `CRAFT_LIBS_GIT` to that URL and `CRAFT_LIBS_REV` to that commit;
+  - commit neither.
+- **Starting a new fork of one of these apps that pins craft-libs:** make this patch its first. Cherry-pick it from `fork/pbr-engine` (effectcraft), `fork/pbr-vectorcraft` (vectorcraft) or `fork/pbr-deckcraft` (deckcraft).
+- **Another check that verifies craft-libs' source:** give it the same two variables, as a patch on the fork.
 
 ## Votes belong to people
 
